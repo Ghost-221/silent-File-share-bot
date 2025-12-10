@@ -1,12 +1,13 @@
 import logging
 import asyncio
-import sqlite3
 import os
 import uuid
 import sys
 from threading import Thread
 from datetime import datetime
 from flask import Flask
+from pymongo import MongoClient
+import certifi
 
 from telegram import (
     Update,
@@ -26,18 +27,17 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8501752321:AAFmSLnhtO0jdlLyyrtPKdPFnL1n
 SOURCE_CHAT_ID = -1003455503034   
 ADMIN_IDS = [6872143322, 8363437161] 
 
-# ডাটাবেস পাথ সেটআপ
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(BASE_DIR, 'bot_data.db')
+# MongoDB URL (আপনার আগের দেওয়া URL টি বসালাম)
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://atkcyber5_db_user:adminabir221@cluster0.4iwef3e.mongodb.net/?appName=Cluster0")
 
 # লগিং
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- SERVER ---
+# --- SERVER (Keep Alive) ---
 app = Flask('')
 @app.route('/')
-def home(): return "Bot Running"
+def home(): return "Bot Running with MongoDB"
 def run_http(): 
     try: app.run(host='0.0.0.0', port=8080)
     except: pass
@@ -45,66 +45,22 @@ def keep_alive():
     t = Thread(target=run_http)
     t.start()
 
-# -------------------- DATABASE ENGINE --------------------
+# -------------------- DATABASE ENGINE (MongoDB) --------------------
 
-def db_query(query, params=(), fetchone=False, commit=False):
-    con = None
-    try:
-        con = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=20)
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        cur.execute(query, params)
-        if commit: con.commit()
-        result = cur.fetchone() if fetchone else cur.fetchall()
-        return result
-    except sqlite3.Error as e:
-        # সাধারণ এরর প্রিন্ট করবে, কিন্তু প্রোগ্রাম বন্ধ হবে না
-        logger.error(f"DB Error: {e}")
-        return None
-    finally:
-        if con: con.close()
-
-def setup_database():
-    print(f"📂 Database Path: {DB_FILE}")
+# মঙ্গোডিবি কানেকশন সেটআপ
+try:
+    # ca=certifi.where() ব্যবহার করা হয়েছে যাতে SSL এরর না দেয়
+    client = MongoClient(MONGO_URL, tlsCAFile=certifi.where())
+    db = client["FileShareBot_V2"] # ডাটাবেস নাম
+    users_col = db["users"]        # ইউজার কালেকশন
+    files_col = db["shared_files"] # ফাইল কালেকশন
     
-    # 1. টেবিল তৈরি (যদি না থাকে)
-    db_query("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            first_name TEXT,
-            username TEXT,
-            join_date TEXT
-        )""", commit=True)
-
-    db_query('''
-        CREATE TABLE IF NOT EXISTS shared_files (
-            unique_code TEXT PRIMARY KEY,
-            file_id TEXT,
-            file_type TEXT,
-            password TEXT,
-            limit_count INTEGER,
-            usage_count INTEGER DEFAULT 0,
-            created_at TEXT
-        )
-    ''', commit=True)
-    
-    # --- AUTO FIX FOR OLD DATABASE ---
-    # যদি আগের ডাটাবেস থাকে এবং created_at না থাকে, তবে এটি অ্যাড করবে
-    try:
-        con = sqlite3.connect(DB_FILE)
-        cur = con.cursor()
-        try:
-            cur.execute("ALTER TABLE shared_files ADD COLUMN created_at TEXT")
-            con.commit()
-            print("✅ Database Fixed: Added missing 'created_at' column.")
-        except sqlite3.OperationalError:
-            # কলাম ইতিমধ্যে থাকলে এই এরর আসবে, আমরা ইগনোর করব
-            pass
-        con.close()
-    except Exception as e:
-        print(f"⚠️ Migration Check Error: {e}")
-
-    print("✅ Database Ready!")
+    # কানেকশন চেক
+    client.admin.command('ping')
+    print("✅ Connected to MongoDB Successfully!")
+except Exception as e:
+    print(f"❌ MongoDB Connection Error: {e}")
+    sys.exit(1)
 
 # -------------------- HANDLERS --------------------
 
@@ -112,10 +68,19 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 async def ensure_user(user):
+    # ইউজার ডাটাবেসে আছে কিনা চেক, না থাকলে অ্যাড করবে (Upsert)
     try:
-        db_query("INSERT OR IGNORE INTO users (user_id, first_name, username, join_date) VALUES (?, ?, ?, ?)",
-                 (user.id, user.first_name, user.username, str(datetime.now())), commit=True)
-    except: pass
+        users_col.update_one(
+            {"user_id": user.id},
+            {"$set": {
+                "first_name": user.first_name,
+                "username": user.username,
+                "last_active": datetime.now()
+            }},
+            upsert=True
+        )
+    except Exception as e:
+        logger.error(f"User Save Error: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -127,21 +92,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args and len(args) > 0:
         unique_code = args[0].strip()
         
-        # ডাটাবেসে খোঁজা
-        result = db_query("SELECT * FROM shared_files WHERE unique_code=?", (unique_code,), fetchone=True)
+        # ডাটাবেসে ফাইল খোঁজা
+        file_data = files_col.find_one({"unique_code": unique_code})
 
-        if not result:
+        if not file_data:
             await update.message.reply_text("❌ <b>লিংকটি ভুল বা মেয়াদোত্তীর্ণ।</b>", parse_mode='HTML')
             return
 
-        if result['usage_count'] >= result['limit_count']:
+        usage = file_data.get('usage_count', 0)
+        limit = file_data.get('limit_count', 0)
+
+        if usage >= limit:
             await update.message.reply_text("❌ <b>দুঃখিত! এই ফাইলের ডাউনলোড লিমিট শেষ।</b>", parse_mode='HTML')
             return
 
         context.user_data['attempting_code'] = unique_code
+        remaining = limit - usage
+        
         await update.message.reply_text(
             f"🔒 <b>ফাইল লক করা আছে!</b>\n\n"
-            f"👇 পাসওয়ার্ড লিখুন:\n(বাকি: {result['limit_count'] - result['usage_count']} জন)", 
+            f"👇 পাসওয়ার্ড লিখুন:\n(বাকি: {remaining} জন)", 
             parse_mode='HTML'
         )
 
@@ -165,6 +135,7 @@ async def admin_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif msg.audio: file_id, file_type = msg.audio.file_id, 'audio'
 
     if file_id:
+        # প্রাইভেট চ্যানেলে ব্যাকআপ রাখা
         try:
             forwarded = await context.bot.forward_message(chat_id=SOURCE_CHAT_ID, from_chat_id=msg.chat_id, message_id=msg.message_id)
             if forwarded.document: file_id = forwarded.document.file_id
@@ -174,6 +145,7 @@ async def admin_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as e:
             print(f"⚠️ Backup Error: {e}")
 
+        # টেম্পোরারি স্টোরেজ
         context.user_data['setup_file'] = {'file_id': file_id, 'file_type': file_type}
         await msg.reply_text("✅ ফাইল রিসিভড! এবার `pass limit` দিন (Example: `pass 50`)")
 
@@ -195,11 +167,17 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             file_data = context.user_data['setup_file']
             unique_code = str(uuid.uuid4())[:8]
 
-            # সেভ করা
-            db_query("""
-                INSERT INTO shared_files (unique_code, file_id, file_type, password, limit_count, usage_count, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (unique_code, file_data['file_id'], file_data['file_type'], password, limit_count, 0, str(datetime.now())), commit=True)
+            # MongoDB তে সেভ করা
+            new_file = {
+                "unique_code": unique_code,
+                "file_id": file_data['file_id'],
+                "file_type": file_data['file_type'],
+                "password": password,
+                "limit_count": limit_count,
+                "usage_count": 0,
+                "created_at": datetime.now()
+            }
+            files_col.insert_one(new_file)
 
             bot_user = await context.bot.get_me()
             link = f"https://t.me/{bot_user.username}?start={unique_code}"
@@ -207,13 +185,14 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(
                 f"✅ **লিংক তৈরি হয়েছে!**\n\n"
                 f"🔗 `{link}`\n"
-                f"🔑 Pass: `{password}`", 
+                f"🔑 Pass: `{password}`\n"
+                f"🔢 Limit: `{limit_count}`", 
                 parse_mode='Markdown'
             )
             del context.user_data['setup_file']
             
         except ValueError:
-            await update.message.reply_text("❌ লিমিট সংখ্যা হতে হবে।")
+            await update.message.reply_text("❌ লিমিট সংখ্যা হতে হবে (যেমন: 50)।")
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
         return
@@ -221,27 +200,35 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     # [USER] পাসওয়ার্ড চেক
     if 'attempting_code' in context.user_data:
         unique_code = context.user_data['attempting_code']
-        result = db_query("SELECT * FROM shared_files WHERE unique_code=?", (unique_code,), fetchone=True)
         
-        if not result:
-            await update.message.reply_text("❌ ফাইল পাওয়া যায়নি।")
+        # ডাটাবেস চেক
+        file_data = files_col.find_one({"unique_code": unique_code})
+        
+        if not file_data:
+            await update.message.reply_text("❌ ফাইলটি ডাটাবেসে পাওয়া যায়নি।")
             return
             
-        if result['usage_count'] >= result['limit_count']:
+        if file_data['usage_count'] >= file_data['limit_count']:
              await update.message.reply_text("❌ লিমিট শেষ।")
              return
 
-        if text == result['password']:
+        if text == file_data['password']:
             await update.message.reply_text("✅ **সঠিক পাসওয়ার্ড!** ফাইল আপলোড হচ্ছে...", parse_mode='Markdown')
             try:
-                ft = result['file_type']
-                fid = result['file_id']
+                ft = file_data['file_type']
+                fid = file_data['file_id']
+                
+                # ফাইল সেন্ড করা
                 if ft == 'document': await context.bot.send_document(user_id, fid)
                 elif ft == 'video': await context.bot.send_video(user_id, fid)
                 elif ft == 'photo': await context.bot.send_photo(user_id, fid)
                 elif ft == 'audio': await context.bot.send_audio(user_id, fid)
                 
-                db_query("UPDATE shared_files SET usage_count=usage_count+1 WHERE unique_code=?", (unique_code,), commit=True)
+                # Usage 1 বাড়ানো (MongoDB $inc অপারেটর)
+                files_col.update_one(
+                    {"unique_code": unique_code},
+                    {"$inc": {"usage_count": 1}}
+                )
             except Exception as e:
                 await update.message.reply_text(f"❌ Error sending file: {e}")
             
@@ -253,15 +240,16 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 # -------------------- MAIN --------------------
 
 def main():
-    setup_database()
     keep_alive()
     
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # হ্যান্ডলার অ্যাড করা
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.ATTACHMENT | filters.VIDEO | filters.PHOTO | filters.AUDIO, admin_file_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_text_handler))
 
-    print("🚀 Bot Started Successfully!")
+    print("🚀 Bot Started Successfully with MongoDB!")
     app.run_polling()
 
 if __name__ == '__main__':
