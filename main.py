@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 
 # -------------------- CONFIG --------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8501752321:AAFmSLnhtO0jdlLyyrtPKdPFnL1nVPUkdDk")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8450069015:AAGb9DnEP4RmBJS5Q1EQ0S1S2mgc5q24-KI")
 SOURCE_CHAT_ID = -1003455503034   
 ADMIN_IDS = [6872143322, 8363437161] 
 
