@@ -26,20 +26,20 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8450069015:AAGb9DnEP4RmBJS5Q1EQ0S1S2mgc5q24-KI")
 SOURCE_CHAT_ID = -1003455503034   
 
-# ✅ এখানে দুটি এডমিন আইডিই দেওয়া আছে
+# ✅ এডমিন আইডি লিস্ট
 ADMIN_IDS = [6872143322, 8363437161, 6698901002] 
 
 # MongoDB URL
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://atkcyber5_db_user:adminabir221@cluster0.4iwef3e.mongodb.net/?appName=Cluster0")
 
-# লগিং (ডিবাগিং এর জন্য)
+# লগিং
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- SERVER (Keep Alive) ---
 app = Flask('')
 @app.route('/')
-def home(): return "Bot Running with MongoDB"
+def home(): return "Bot Running with Auto Delete Feature"
 def run_http(): 
     try: app.run(host='0.0.0.0', port=8080)
     except: pass
@@ -63,7 +63,6 @@ except Exception as e:
 # -------------------- HANDLERS --------------------
 
 def is_admin(user_id: int) -> bool:
-    """চেক করবে ইউজার এডমিন কিনা"""
     return user_id in ADMIN_IDS
 
 async def ensure_user(user):
@@ -79,6 +78,25 @@ async def ensure_user(user):
         )
     except Exception as e:
         logger.error(f"User Save Error: {e}")
+
+# --- অটো ডিলিট ফাংশন (Job Queue) ---
+async def delete_file_job(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data
+    channel_msg_id = job_data.get('channel_msg_id')
+    unique_code = job_data.get('unique_code')
+
+    try:
+        # চ্যানেল থেকে মেসেজ ডিলিট করা
+        await context.bot.delete_message(chat_id=SOURCE_CHAT_ID, message_id=channel_msg_id)
+        print(f"🗑️ File deleted from channel. Msg ID: {channel_msg_id}")
+        
+        # ডাটাবেসে আপডেট করা যে ফাইলটি সোর্স থেকে ডিলিট হয়েছে (অপশনাল)
+        files_col.update_one(
+            {"unique_code": unique_code},
+            {"$set": {"is_deleted_from_channel": True}}
+        )
+    except Exception as e:
+        print(f"⚠️ Auto Delete Failed: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -114,25 +132,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- সাধারণ ওয়েলকাম ---
     else:
-        # এডমিন চেক এবং কনফার্মেশন মেসেজ
         if is_admin(user.id):
             await update.message.reply_text(
                 f"👋 <b>Welcome Admin!</b>\n"
-                f"✅ Your ID: `{user.id}` (Matched)\n\n"
-                f"ফাইল আপলোড করুন, তারপর আমি পাসওয়ার্ড চাইবো।", 
+                f"✅ Your ID: `{user.id}`\n\n"
+                f"ফাইল আপলোড করুন, তারপর পাসওয়ার্ড, লিমিট এবং সময় সেট করুন।", 
                 parse_mode='Markdown'
             )
         else:
-            await update.message.reply_text(f"👋 হ্যালো {user.first_name}!\nID: `{user.id}`")
+            await update.message.reply_text(f"👋 হ্যালো {user.first_name}!")
 
 # --- ফাইল আপলোড (Admin Only) ---
 async def admin_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # এখানে চেক করা হচ্ছে ইউজার এডমিন কিনা
-    if not is_admin(user_id): 
-        # এডমিন না হলে কিছু করবে না বা রিপ্লাই দিতে পারেন
-        return
+    if not is_admin(user_id): return
 
     msg = update.message
     file_id, file_type = None, None
@@ -143,8 +157,12 @@ async def admin_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif msg.audio: file_id, file_type = msg.audio.file_id, 'audio'
 
     if file_id:
+        channel_msg_id = None
         try:
+            # চ্যানেলে ফরোয়ার্ড করা হচ্ছে
             forwarded = await context.bot.forward_message(chat_id=SOURCE_CHAT_ID, from_chat_id=msg.chat_id, message_id=msg.message_id)
+            channel_msg_id = forwarded.message_id  # চ্যানেলের মেসেজ আইডি সেভ রাখা হলো
+            
             if forwarded.document: file_id = forwarded.document.file_id
             elif forwarded.video: file_id = forwarded.video.file_id
             elif forwarded.photo: file_id = forwarded.photo[-1].file_id
@@ -152,55 +170,95 @@ async def admin_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as e:
             print(f"⚠️ Backup Error: {e}")
 
-        context.user_data['setup_file'] = {'file_id': file_id, 'file_type': file_type}
-        await msg.reply_text("✅ ফাইল পেয়েছি! এবার পাসওয়ার্ড এবং লিমিট সেট করুন।\n\nFormat: `password limit`\nExample: `atk123 50`", parse_mode='Markdown')
+        # setup_file এ step: 1 সেট করা হলো
+        context.user_data['setup_file'] = {
+            'file_id': file_id, 
+            'file_type': file_type, 
+            'channel_msg_id': channel_msg_id,
+            'step': 1 
+        }
+        await msg.reply_text("✅ ফাইল রিসিভ হয়েছে!\n\n**Step 1:** পাসওয়ার্ড এবং লিমিট লিখুন।\nFormat: `password limit`\nExample: `pass123 20`", parse_mode='Markdown')
 
-# --- পাসওয়ার্ড ও লিংক জেনারেশন ---
+# --- পাসওয়ার্ড, লিংক এবং টাইমার সেটআপ ---
 async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # [ADMIN] লিংক তৈরি (উভয় এডমিনের জন্য কাজ করবে)
+    # [ADMIN] সেটআপ হ্যান্ডলার
     if is_admin(user_id) and 'setup_file' in context.user_data:
-        try:
-            parts = text.split()
-            if len(parts) < 2:
-                await update.message.reply_text("❌ ভুল! লিখুন: `password limit` (Ex: `pass 10`)", parse_mode='Markdown')
-                return
-            
-            password = parts[0]
-            limit_count = int(parts[1])
-            file_data = context.user_data['setup_file']
-            unique_code = str(uuid.uuid4())[:8]
+        setup_data = context.user_data['setup_file']
+        
+        # Step 1: পাসওয়ার্ড এবং লিমিট নেওয়া
+        if setup_data['step'] == 1:
+            try:
+                parts = text.split()
+                if len(parts) < 2:
+                    await update.message.reply_text("❌ ভুল! লিখুন: `password limit` (Ex: `pass 10`)", parse_mode='Markdown')
+                    return
+                
+                setup_data['password'] = parts[0]
+                setup_data['limit_count'] = int(parts[1])
+                setup_data['step'] = 2 # পরের স্টেপে যাওয়া
+                
+                await update.message.reply_text(
+                    "✅ পাসওয়ার্ড ও লিমিট সেট হয়েছে।\n\n"
+                    "**Step 2:** এই ফাইলটি **Private Channel** এ কতক্ষণ থাকবে? (মিনিটে লিখুন)\n"
+                    "উদাহরণ: `20` (মানে ২০ মিনিট পর ডিলিট হবে)",
+                    parse_mode='Markdown'
+                )
+            except ValueError:
+                await update.message.reply_text("❌ লিমিট সংখ্যা হতে হবে (যেমন: 50)।")
+            return
 
-            new_file = {
-                "unique_code": unique_code,
-                "file_id": file_data['file_id'],
-                "file_type": file_data['file_type'],
-                "password": password,
-                "limit_count": limit_count,
-                "usage_count": 0,
-                "created_at": datetime.now()
-            }
-            files_col.insert_one(new_file)
+        # Step 2: সময় নেওয়া এবং লিংক জেনারেট করা
+        elif setup_data['step'] == 2:
+            try:
+                delete_minutes = int(text)
+                delete_seconds = delete_minutes * 60
+                
+                unique_code = str(uuid.uuid4())[:8]
+                
+                new_file = {
+                    "unique_code": unique_code,
+                    "file_id": setup_data['file_id'],
+                    "file_type": setup_data['file_type'],
+                    "password": setup_data['password'],
+                    "limit_count": setup_data['limit_count'],
+                    "usage_count": 0,
+                    "created_at": datetime.now(),
+                    "delete_in_mins": delete_minutes
+                }
+                files_col.insert_one(new_file)
 
-            bot_user = await context.bot.get_me()
-            link = f"https://t.me/{bot_user.username}?start={unique_code}"
-            
-            await update.message.reply_text(
-                f"✅ **লিংক তৈরি হয়েছে!**\n\n"
-                f"🔗 `{link}`\n"
-                f"🔑 Pass: `{password}`\n"
-                f"🔢 Limit: `{limit_count}`", 
-                parse_mode='Markdown'
-            )
-            del context.user_data['setup_file']
-            
-        except ValueError:
-            await update.message.reply_text("❌ লিমিট সংখ্যা হতে হবে (যেমন: 50)।")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
-        return
+                # Job Queue তে ডিলিট শিডিউল করা
+                if setup_data['channel_msg_id']:
+                    context.job_queue.run_once(
+                        delete_file_job, 
+                        delete_seconds, 
+                        data={
+                            'channel_msg_id': setup_data['channel_msg_id'],
+                            'unique_code': unique_code
+                        }
+                    )
+
+                bot_user = await context.bot.get_me()
+                link = f"https://t.me/{bot_user.username}?start={unique_code}"
+                
+                await update.message.reply_text(
+                    f"✅ **কাজ সম্পন্ন!**\n\n"
+                    f"🔗 Link: `{link}`\n"
+                    f"🔑 Pass: `{setup_data['password']}`\n"
+                    f"🔢 Limit: `{setup_data['limit_count']}`\n"
+                    f"⏳ Auto Delete: `{delete_minutes} mins`", 
+                    parse_mode='Markdown'
+                )
+                del context.user_data['setup_file']
+                
+            except ValueError:
+                await update.message.reply_text("❌ দয়া করে শুধু সংখ্যা লিখুন (মিনিট)। যেমন: 20")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error: {e}")
+            return
 
     # [USER] পাসওয়ার্ড চেক
     if 'attempting_code' in context.user_data:
@@ -209,7 +267,7 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         file_data = files_col.find_one({"unique_code": unique_code})
         
         if not file_data:
-            await update.message.reply_text("❌ ফাইল ডাটাবেসে নেই।")
+            await update.message.reply_text("❌ ফাইল ডাটাবেসে নেই বা ডিলিট হয়েছে।")
             return
             
         if file_data['usage_count'] >= file_data['limit_count']:
@@ -250,7 +308,7 @@ def main():
     app.add_handler(MessageHandler(filters.ATTACHMENT | filters.VIDEO | filters.PHOTO | filters.AUDIO, admin_file_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_text_handler))
 
-    print("🚀 Bot Started Successfully!")
+    print("🚀 Bot Started Successfully with Auto-Delete!")
     app.run_polling()
 
 if __name__ == '__main__':
