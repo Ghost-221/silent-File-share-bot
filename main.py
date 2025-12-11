@@ -25,12 +25,14 @@ from telegram.ext import (
 # -------------------- CONFIG --------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8450069015:AAGb9DnEP4RmBJS5Q1EQ0S1S2mgc5q24-KI")
 SOURCE_CHAT_ID = -1003455503034   
+
+# ✅ এখানে দুটি এডমিন আইডিই দেওয়া আছে
 ADMIN_IDS = [6872143322, 8363437161] 
 
-# MongoDB URL (আপনার আগের দেওয়া URL টি বসালাম)
+# MongoDB URL
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://atkcyber5_db_user:adminabir221@cluster0.4iwef3e.mongodb.net/?appName=Cluster0")
 
-# লগিং
+# লগিং (ডিবাগিং এর জন্য)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -46,16 +48,12 @@ def keep_alive():
     t.start()
 
 # -------------------- DATABASE ENGINE (MongoDB) --------------------
-
-# মঙ্গোডিবি কানেকশন সেটআপ
 try:
-    # ca=certifi.where() ব্যবহার করা হয়েছে যাতে SSL এরর না দেয়
     client = MongoClient(MONGO_URL, tlsCAFile=certifi.where())
-    db = client["FileShareBot_V2"] # ডাটাবেস নাম
-    users_col = db["users"]        # ইউজার কালেকশন
-    files_col = db["shared_files"] # ফাইল কালেকশন
+    db = client["FileShareBot_V2"] 
+    users_col = db["users"]        
+    files_col = db["shared_files"] 
     
-    # কানেকশন চেক
     client.admin.command('ping')
     print("✅ Connected to MongoDB Successfully!")
 except Exception as e:
@@ -65,10 +63,10 @@ except Exception as e:
 # -------------------- HANDLERS --------------------
 
 def is_admin(user_id: int) -> bool:
+    """চেক করবে ইউজার এডমিন কিনা"""
     return user_id in ADMIN_IDS
 
 async def ensure_user(user):
-    # ইউজার ডাটাবেসে আছে কিনা চেক, না থাকলে অ্যাড করবে (Upsert)
     try:
         users_col.update_one(
             {"user_id": user.id},
@@ -92,7 +90,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args and len(args) > 0:
         unique_code = args[0].strip()
         
-        # ডাটাবেসে ফাইল খোঁজা
         file_data = files_col.find_one({"unique_code": unique_code})
 
         if not file_data:
@@ -117,14 +114,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- সাধারণ ওয়েলকাম ---
     else:
+        # এডমিন চেক এবং কনফার্মেশন মেসেজ
         if is_admin(user.id):
-            await update.message.reply_text("👋 <b>Admin Panel</b>\nফাইল আপলোড করে `pass limit` লিখুন।", parse_mode='HTML')
+            await update.message.reply_text(
+                f"👋 <b>Welcome Admin!</b>\n"
+                f"✅ Your ID: `{user.id}` (Matched)\n\n"
+                f"ফাইল আপলোড করুন, তারপর আমি পাসওয়ার্ড চাইবো।", 
+                parse_mode='Markdown'
+            )
         else:
-            await update.message.reply_text(f"👋 হ্যালো {user.first_name}!")
+            await update.message.reply_text(f"👋 হ্যালো {user.first_name}!\nID: `{user.id}`")
 
-# --- ফাইল আপলোড (Admin) ---
+# --- ফাইল আপলোড (Admin Only) ---
 async def admin_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
+    user_id = update.effective_user.id
+    
+    # এখানে চেক করা হচ্ছে ইউজার এডমিন কিনা
+    if not is_admin(user_id): 
+        # এডমিন না হলে কিছু করবে না বা রিপ্লাই দিতে পারেন
+        return
 
     msg = update.message
     file_id, file_type = None, None
@@ -135,7 +143,6 @@ async def admin_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif msg.audio: file_id, file_type = msg.audio.file_id, 'audio'
 
     if file_id:
-        # প্রাইভেট চ্যানেলে ব্যাকআপ রাখা
         try:
             forwarded = await context.bot.forward_message(chat_id=SOURCE_CHAT_ID, from_chat_id=msg.chat_id, message_id=msg.message_id)
             if forwarded.document: file_id = forwarded.document.file_id
@@ -145,21 +152,20 @@ async def admin_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as e:
             print(f"⚠️ Backup Error: {e}")
 
-        # টেম্পোরারি স্টোরেজ
         context.user_data['setup_file'] = {'file_id': file_id, 'file_type': file_type}
-        await msg.reply_text("✅ ফাইল রিসিভড! এবার `pass limit` দিন (Example: `pass 50`)")
+        await msg.reply_text("✅ ফাইল পেয়েছি! এবার পাসওয়ার্ড এবং লিমিট সেট করুন।\n\nFormat: `password limit`\nExample: `atk123 50`", parse_mode='Markdown')
 
 # --- পাসওয়ার্ড ও লিংক জেনারেশন ---
 async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # [ADMIN] লিংক তৈরি
+    # [ADMIN] লিংক তৈরি (উভয় এডমিনের জন্য কাজ করবে)
     if is_admin(user_id) and 'setup_file' in context.user_data:
         try:
             parts = text.split()
             if len(parts) < 2:
-                await update.message.reply_text("❌ ভুল! লিখুন: `password 50`")
+                await update.message.reply_text("❌ ভুল! লিখুন: `password limit` (Ex: `pass 10`)", parse_mode='Markdown')
                 return
             
             password = parts[0]
@@ -167,7 +173,6 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             file_data = context.user_data['setup_file']
             unique_code = str(uuid.uuid4())[:8]
 
-            # MongoDB তে সেভ করা
             new_file = {
                 "unique_code": unique_code,
                 "file_id": file_data['file_id'],
@@ -201,11 +206,10 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if 'attempting_code' in context.user_data:
         unique_code = context.user_data['attempting_code']
         
-        # ডাটাবেস চেক
         file_data = files_col.find_one({"unique_code": unique_code})
         
         if not file_data:
-            await update.message.reply_text("❌ ফাইলটি ডাটাবেসে পাওয়া যায়নি।")
+            await update.message.reply_text("❌ ফাইল ডাটাবেসে নেই।")
             return
             
         if file_data['usage_count'] >= file_data['limit_count']:
@@ -218,13 +222,11 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 ft = file_data['file_type']
                 fid = file_data['file_id']
                 
-                # ফাইল সেন্ড করা
                 if ft == 'document': await context.bot.send_document(user_id, fid)
                 elif ft == 'video': await context.bot.send_video(user_id, fid)
                 elif ft == 'photo': await context.bot.send_photo(user_id, fid)
                 elif ft == 'audio': await context.bot.send_audio(user_id, fid)
                 
-                # Usage 1 বাড়ানো (MongoDB $inc অপারেটর)
                 files_col.update_one(
                     {"unique_code": unique_code},
                     {"$inc": {"usage_count": 1}}
@@ -244,12 +246,11 @@ def main():
     
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # হ্যান্ডলার অ্যাড করা
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.ATTACHMENT | filters.VIDEO | filters.PHOTO | filters.AUDIO, admin_file_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_text_handler))
 
-    print("🚀 Bot Started Successfully with MongoDB!")
+    print("🚀 Bot Started Successfully!")
     app.run_polling()
 
 if __name__ == '__main__':
