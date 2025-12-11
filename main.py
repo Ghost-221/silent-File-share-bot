@@ -27,7 +27,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8450069015:AAGb9DnEP4RmBJS5Q1EQ0S1S2mgc
 SOURCE_CHAT_ID = -1003455503034   
 
 # ✅ এখানে দুটি এডমিন আইডিই দেওয়া আছে
-ADMIN_IDS = [6872143322, 8363437161] 
+ADMIN_IDS = [6872143322, 8363437161, 6698901002] 
 
 # MongoDB URL
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://atkcyber5_db_user:adminabir221@cluster0.4iwef3e.mongodb.net/?appName=Cluster0")
