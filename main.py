@@ -90,13 +90,13 @@ async def delete_file_job(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_message(chat_id=SOURCE_CHAT_ID, message_id=channel_msg_id)
         print(f"🗑️ File deleted from channel. Msg ID: {channel_msg_id}")
         
-        # ডাটাবেসে আপডেট করা যে ফাইলটি সোর্স থেকে ডিলিট হয়েছে (অপশনাল)
+        # ডাটাবেসে আপডেট করা
         files_col.update_one(
             {"unique_code": unique_code},
             {"$set": {"is_deleted_from_channel": True}}
         )
     except Exception as e:
-        print(f"⚠️ Auto Delete Failed: {e}")
+        print(f"⚠️ Auto Delete Failed (Message might be already deleted): {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -161,7 +161,7 @@ async def admin_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             # চ্যানেলে ফরোয়ার্ড করা হচ্ছে
             forwarded = await context.bot.forward_message(chat_id=SOURCE_CHAT_ID, from_chat_id=msg.chat_id, message_id=msg.message_id)
-            channel_msg_id = forwarded.message_id  # চ্যানেলের মেসেজ আইডি সেভ রাখা হলো
+            channel_msg_id = forwarded.message_id
             
             if forwarded.document: file_id = forwarded.document.file_id
             elif forwarded.video: file_id = forwarded.video.file_id
@@ -170,7 +170,6 @@ async def admin_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as e:
             print(f"⚠️ Backup Error: {e}")
 
-        # setup_file এ step: 1 সেট করা হলো
         context.user_data['setup_file'] = {
             'file_id': file_id, 
             'file_type': file_type, 
@@ -198,7 +197,7 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 
                 setup_data['password'] = parts[0]
                 setup_data['limit_count'] = int(parts[1])
-                setup_data['step'] = 2 # পরের স্টেপে যাওয়া
+                setup_data['step'] = 2 
                 
                 await update.message.reply_text(
                     "✅ পাসওয়ার্ড ও লিমিট সেট হয়েছে।\n\n"
@@ -231,15 +230,18 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 files_col.insert_one(new_file)
 
                 # Job Queue তে ডিলিট শিডিউল করা
-                if setup_data['channel_msg_id']:
-                    context.job_queue.run_once(
-                        delete_file_job, 
-                        delete_seconds, 
-                        data={
-                            'channel_msg_id': setup_data['channel_msg_id'],
-                            'unique_code': unique_code
-                        }
-                    )
+                if context.job_queue:
+                    if setup_data['channel_msg_id']:
+                        context.job_queue.run_once(
+                            delete_file_job, 
+                            delete_seconds, 
+                            data={
+                                'channel_msg_id': setup_data['channel_msg_id'],
+                                'unique_code': unique_code
+                            }
+                        )
+                else:
+                    await update.message.reply_text("⚠️ **সতর্কতা:** JobQueue সক্রিয় নেই। অটো ডিলিট কাজ করবে না। requirements.txt চেক করুন।")
 
                 bot_user = await context.bot.get_me()
                 link = f"https://t.me/{bot_user.username}?start={unique_code}"
@@ -302,7 +304,14 @@ async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 def main():
     keep_alive()
     
+    # Application Builder
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Check if JobQueue is available
+    if app.job_queue is None:
+        print("❌ ERROR: JobQueue is NOT available. Please install 'python-telegram-bot[job-queue]'.")
+    else:
+        print("✅ JobQueue is active.")
     
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.ATTACHMENT | filters.VIDEO | filters.PHOTO | filters.AUDIO, admin_file_handler))
